@@ -3,33 +3,16 @@ import yfinance as yf
 import pandas as pd
 
 # ==========================================
-# 1. 頁面設定 (UI Layout)
+# 1. 系統初始化與頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="T100 智力夥伴選股系統",
-    page_icon="📈",
+    page_title="T100 智力夥伴選股系統 V3.0",
+    page_icon="🧠",
     layout="wide"
 )
 
-st.title("🚀 T100 ERP 顧問級選股儀表板")
-st.markdown("### 核心邏輯：基本面 (PE估值) + 技術面 (MA黃金交叉)")
-
 # ==========================================
-# 2. 側邊欄參數設定
-# ==========================================
-with st.sidebar:
-    st.header("⚙️ 系統參數設定")
-    st.info("這裡可以動態調整採購策略，不需改Code。")
-    
-    st.subheader("估值標準 (PE Ratio)")
-    pe_tech_bull = st.slider("科技股-多頭 PE", 15, 30, 22)
-    pe_tech_bear = st.slider("科技股-空頭 PE", 10, 20, 14)
-    pe_fin_bull  = st.slider("金融/傳產-多頭 PE", 10, 20, 15)
-    
-    run_btn = st.button("🔄 執行全自動掃描", type="primary")
-
-# ==========================================
-# 3. 資料來源 (台灣50 - 中文主檔對照表)
+# 2. 資料來源 (台灣50 - 完整中文主檔)
 # ==========================================
 tw50_dict = {
     '2330.TW': '台積電', '2317.TW': '鴻海', '2454.TW': '聯發科', '2308.TW': '台達電', 
@@ -48,9 +31,57 @@ tw50_dict = {
 }
 
 # ==========================================
-# 4. 運算函數 (Logic Core)
+# 3. 側邊欄：策略控制台
+# ==========================================
+with st.sidebar:
+    st.title("🎛️ 戰術控制台")
+    st.info("請選擇本週的操作風格：")
+    
+    # 策略選擇器
+    strategy_mode = st.radio(
+        "選擇策略模組：",
+        ("🚀 動能爆發 (PE+黃金交叉)", "🛡️ 拉回防守 (牙醫策略)")
+    )
+    
+    st.divider()
+    
+    if strategy_mode == "🚀 動能爆發 (PE+黃金交叉)":
+        st.caption("參數設定 (PE估值)：")
+        pe_tech_bull = st.slider("科技股-多頭 PE", 15, 30, 22)
+        pe_tech_bear = st.slider("科技股-空頭 PE", 10, 20, 14)
+        pe_fin_bull  = st.slider("金融/傳產-多頭 PE", 10, 20, 15)
+    else:
+        st.caption("參數設定 (支撐判定)：")
+        pullback_tolerance = st.slider("容許誤差範圍 (%)", 1, 5, 3)
+        st.markdown(f"> 尋找股價回到均線 `{pullback_tolerance}%` 範圍內的股票。")
+
+    run_btn = st.button("🔄 執行全自動掃描", type="primary")
+
+# ==========================================
+# 4. 顯示：策略邏輯說明 (SOP)
+# ==========================================
+st.title(f"📊 T100 顧問級選股系統 V3.0")
+
+if strategy_mode == "🚀 動能爆發 (PE+黃金交叉)":
+    st.success("""
+    **【當前策略邏輯：進攻型】** 1. **價值濾網：** 股價 < (EPS × 合理PE)，具備 >15% 潛在漲幅。
+    2. **趨勢濾網：** 5日均線(MA5) > 20日均線(MA20)，呈現短多排列。
+    3. **目標：** 抓出「便宜」且「剛發動」的股票。
+    """)
+else:
+    st.info("""
+    **【當前策略邏輯：防守型 (股市牙醫版)】**
+    1. **大趨勢確立：** 股價必須在 60日均線(季線) 之上，確保長多格局。
+    2. **等待好球帶：** 股價回檔至 20日均線(月線) 附近 (誤差範圍內)。
+    3. **風險報酬比：** 進場點離支撐點(MA20)很近，停損空間小，風報比極佳。
+    4. **目標：** 不追高，買在「回檔止穩」的安全點。
+    """)
+
+# ==========================================
+# 5. 核心運算引擎
 # ==========================================
 def get_pe_params(sector):
+    # 根據 UI 設定回傳 PE 參數
     if sector == 'Technology':
         return {'pe_bull': pe_tech_bull, 'pe_bear': pe_tech_bear}
     elif sector == 'Financial Services':
@@ -62,141 +93,130 @@ def run_analysis():
     results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     total_stocks = len(tw50_dict)
     
-    # 遍歷 Dictionary
     for i, (ticker_id, ch_name) in enumerate(tw50_dict.items()):
         progress = (i + 1) / total_stocks
         progress_bar.progress(progress)
-        status_text.text(f"正在掃描: {ch_name} ({ticker_id})...")
+        status_text.text(f"Scanning: {ch_name}...")
 
         try:
             stock = yf.Ticker(ticker_id)
-            # 嘗試抓取，如果失敗這裡會報錯被 except 抓到
-            info = stock.info 
+            info = stock.info
             
+            # --- 基礎資料 ---
             sector = info.get('sector', 'Unknown')
             eps_ttm = info.get('trailingEps', 0)
             current_price = info.get('currentPrice', 0)
             
-            if current_price == 0:
+            if current_price == 0: # 防呆
                 hist_fast = stock.history(period='1d')
                 if not hist_fast.empty:
                     current_price = hist_fast['Close'].iloc[-1]
 
-            # 技術面運算
+            # --- 技術指標運算 ---
             hist = stock.history(period="6mo") 
             if len(hist) < 60: continue
 
             ma_5  = hist['Close'].rolling(window=5).mean().iloc[-1]
-            ma_20 = hist['Close'].rolling(window=20).mean().iloc[-1]
-            ma_60 = hist['Close'].rolling(window=60).mean().iloc[-1]
+            ma_20 = hist['Close'].rolling(window=20).mean().iloc[-1] # 月線 (支撐線)
+            ma_60 = hist['Close'].rolling(window=60).mean().iloc[-1] # 季線 (生命線)
             
-            is_bull_trend = current_price > ma_60
-            trend_str = "多頭" if is_bull_trend else "空頭"
-            is_golden_cross = ma_5 > ma_20
-            tech_signal = "🔥黃金交叉" if is_golden_cross else "☁️整理中"
-
-            pe_params = get_pe_params(sector)
-            target_pe = pe_params['pe_bull'] if is_bull_trend else pe_params['pe_bear']
-            predicted_price = eps_ttm * target_pe
-            
+            # --- 策略分流 ---
             action = "觀望"
-            gap_rate = -999 
-            pred_display = "-"
-            gap_display = "N/A"
-
-            if predicted_price <= 0:
-                 gap_display = "N/A (ETF/虧損)"
-                 action = "參考趨勢"
-            elif current_price > 0:
-                gap_rate = (predicted_price - current_price) / current_price
-                gap_display = f"{gap_rate:.1%}"
-                pred_display = round(predicted_price, 1)
+            detail_msg = ""
+            risk_rate = 0.0
+            
+            # [策略 A] 動能爆發 (原本邏輯)
+            if strategy_mode == "🚀 動能爆發 (PE+黃金交叉)":
+                is_bull_trend = current_price > ma_60
+                is_golden_cross = ma_5 > ma_20
                 
-                if gap_rate > 0.15 and is_golden_cross:
-                    action = "★ 強力買進"
-                elif gap_rate > 0.15 and not is_golden_cross:
-                    action = "觀察 (低估但弱)"
-                elif gap_rate > 0.05 and is_golden_cross:
-                    action = "買進 (動能強)"
-                elif gap_rate < -0.15:
-                    action = "避開 (高估)"
+                # PE 估值
+                if eps_ttm > 0 and '0050' not in ticker_id:
+                    pe_params = get_pe_params(sector)
+                    target_pe = pe_params['pe_bull'] if is_bull_trend else pe_params['pe_bear']
+                    predicted_price = eps_ttm * target_pe
+                    gap_rate = (predicted_price - current_price) / current_price
+                    
+                    if gap_rate > 0.15 and is_golden_cross:
+                        action = "★ 強力買進"
+                        detail_msg = f"低估 {gap_rate:.1%} + 黃金交叉"
+                    elif gap_rate > 0.15:
+                        action = "觀察 (趨勢弱)"
+                        detail_msg = "便宜但無動能"
+                else:
+                    detail_msg = "ETF/無EPS" # 0050 不適用 PE 策略
 
-            results.append({
-                '代號': ticker_id.replace('.TW', ''),
-                '名稱': ch_name,
-                '現價': round(current_price, 1),
-                '建議': action,
-                '技術': tech_signal,
-                '預測價': pred_display,
-                '潛在漲幅': gap_rate,
-                '漲幅顯示': gap_display
-            })
+            # [策略 B] 拉回防守 (牙醫策略)
+            else:
+                # 條件1: 長多趨勢 (股價 > 季線)
+                if current_price > ma_60:
+                    # 條件2: 計算與月線(MA20)的乖離率
+                    # 若為正值，代表股價在月線之上；若負值代表跌破
+                    bias_20 = (current_price - ma_20) / ma_20
+                    
+                    # 邏輯：股價在月線上方，但距離很近 (例如 0% ~ 3%)，視為拉回支撐
+                    tolerance = pullback_tolerance / 100
+                    
+                    if 0 < bias_20 < tolerance:
+                        action = "🛡️ 拉回買點"
+                        risk_rate = bias_20
+                        detail_msg = f"回測月線 (距支撐 {bias_20:.1%})"
+                    elif bias_20 < 0:
+                        action = "⚠️ 跌破支撐"
+                        detail_msg = "已破月線，觀望"
+                    else:
+                        detail_msg = f"乖離過大 ({bias_20:.1%})"
+                else:
+                    detail_msg = "空頭趨勢 (股價<季線)"
+
+            # --- 寫入結果 ---
+            if "買" in action or "拉回" in action: # 只收集有機會的
+                results.append({
+                    '代號': ticker_id.replace('.TW', ''),
+                    '名稱': ch_name,
+                    '現價': round(current_price, 1),
+                    '系統建議': action,
+                    '判斷理由': detail_msg,
+                    '月線(支撐)': round(ma_20, 1),
+                    '季線(趨勢)': round(ma_60, 1)
+                })
 
         except Exception as e:
-            # 在這裡，我們不只是 pass，還可以考慮 print 出來除錯
-            # 但為了不讓畫面亂掉，我們先 pass，如果 results 為空再處理
             pass
             
     status_text.text("掃描完成！")
     return pd.DataFrame(results)
 
 # ==========================================
-# 5. 主程式執行與顯示 (Main Execution)
+# 6. 主程式執行與報表呈現
 # ==========================================
 
 if run_btn:
     df = run_analysis()
     
-    # === [關鍵修正] 檢查 DataFrame 是否為空 ===
     if df.empty:
-        st.error("⚠️ 掃描失敗：抓不到任何資料。")
-        st.warning("可能原因：Yahoo Finance 暫時阻擋了連線 (Rate Limit)。請稍等 1 分鐘後再試。")
+        st.warning("🔍 目前沒有符合此策略標準的股票。 (這也是一種保護，代表現在不適合進場)")
     else:
-        # 資料處理：排序
-        def sort_score(row):
-            if "強力買進" in row['建議']: return 3
-            if "買進" in row['建議'] and "強力" not in row['建議']: return 2
-            if "觀察" in row['建議']: return 1
-            return 0
+        # 排序邏輯：
+        # 動能策略 -> 依照潛在漲幅 (這裡沒顯示，簡化排序)
+        # 拉回策略 -> 依照「判斷理由」中的距離排序 (字串排序勉強可用，或不排)
         
-        df['SortScore'] = df.apply(sort_score, axis=1)
-        df = df.sort_values(by=['SortScore', '潛在漲幅'], ascending=[False, False])
+        st.subheader(f"📋 掃描結果：{strategy_mode}")
         
-        # --- 顯示區塊 1: 重點關注 ---
-        st.subheader("🏆 本週首選 (強力買進)")
-        top_picks = df[df['建議'].str.contains("強力買進")]
+        # 針對「拉回策略」特別顯示重點指標
+        if "牙醫" in strategy_mode:
+            st.caption("💡 牙醫心法：買在支撐附近，停損設在跌破月線(MA20)時。")
         
-        if not top_picks.empty:
-            for index, row in top_picks.iterrows():
-                col1, col2, col3 = st.columns(3)
-                col1.metric("股票", f"{row['名稱']} ({row['代號']})")
-                col2.metric("現價", f"{row['現價']}", f"{row['漲幅顯示']} (空間)")
-                col3.metric("狀態", row['技術'])
-                st.divider()
-        else:
-            st.warning("目前沒有符合「強力買進」雙重條件的標的，建議觀望。")
+        # 樣式設定
+        def highlight_row(row):
+            return ['background-color: #e6fffa; color: black']*len(row) if "買" in row['系統建議'] else ['']*len(row)
 
-        # --- 顯示區塊 2: 完整報表 ---
-        st.subheader("📊 完整掃描清單")
-        
-        def color_survived(val):
-            color = ''
-            if '強力買進' in str(val):
-                color = 'background-color: #90EE90; color: black' 
-            elif '避開' in str(val):
-                color = 'background-color: #FFB6C1; color: black'
-            return color
-
-        display_cols = ['代號', '名稱', '現價', '建議', '技術', '預測價', '漲幅顯示']
-        
         st.dataframe(
-            df[display_cols].style.applymap(color_survived, subset=['建議']),
+            df.style.apply(highlight_row, axis=1),
             use_container_width=True,
             hide_index=True
         )
-
 else:
-    st.info("👈 請點擊側邊欄的按鈕開始掃描")
+    st.write("👈 請點擊側邊欄按鈕開始掃描")
