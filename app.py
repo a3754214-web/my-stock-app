@@ -31,7 +31,6 @@ with st.sidebar:
 # ==========================================
 # 3. 資料來源 (台灣50 - 中文主檔對照表)
 # ==========================================
-# 這是你的「料件主檔」，確保名稱顯示為中文
 tw50_dict = {
     '2330.TW': '台積電', '2317.TW': '鴻海', '2454.TW': '聯發科', '2308.TW': '台達電', 
     '2303.TW': '聯電', '2881.TW': '富邦金', '2882.TW': '國泰金', '2382.TW': '廣達', 
@@ -68,26 +67,25 @@ def run_analysis():
     
     # 遍歷 Dictionary
     for i, (ticker_id, ch_name) in enumerate(tw50_dict.items()):
-        # 更新進度條
         progress = (i + 1) / total_stocks
         progress_bar.progress(progress)
         status_text.text(f"正在掃描: {ch_name} ({ticker_id})...")
 
         try:
             stock = yf.Ticker(ticker_id)
-            info = stock.info
+            # 嘗試抓取，如果失敗這裡會報錯被 except 抓到
+            info = stock.info 
             
             sector = info.get('sector', 'Unknown')
             eps_ttm = info.get('trailingEps', 0)
             current_price = info.get('currentPrice', 0)
             
-            # 防呆：補抓收盤價
             if current_price == 0:
                 hist_fast = stock.history(period='1d')
                 if not hist_fast.empty:
                     current_price = hist_fast['Close'].iloc[-1]
 
-            # 技術面運算 (需 60 天以上資料)
+            # 技術面運算
             hist = stock.history(period="6mo") 
             if len(hist) < 60: continue
 
@@ -100,18 +98,15 @@ def run_analysis():
             is_golden_cross = ma_5 > ma_20
             tech_signal = "🔥黃金交叉" if is_golden_cross else "☁️整理中"
 
-            # 估值運算
             pe_params = get_pe_params(sector)
             target_pe = pe_params['pe_bull'] if is_bull_trend else pe_params['pe_bear']
             predicted_price = eps_ttm * target_pe
             
-            # 決策訊號與例外管理
             action = "觀望"
-            gap_rate = -999 # 排序用預設值
+            gap_rate = -999 
             pred_display = "-"
             gap_display = "N/A"
 
-            # 針對 ETF 或虧損股 (預測價<=0) 的處理
             if predicted_price <= 0:
                  gap_display = "N/A (ETF/虧損)"
                  action = "參考趨勢"
@@ -120,7 +115,6 @@ def run_analysis():
                 gap_display = f"{gap_rate:.1%}"
                 pred_display = round(predicted_price, 1)
                 
-                # 策略核心：基本面 + 技術面
                 if gap_rate > 0.15 and is_golden_cross:
                     action = "★ 強力買進"
                 elif gap_rate > 0.15 and not is_golden_cross:
@@ -132,16 +126,18 @@ def run_analysis():
 
             results.append({
                 '代號': ticker_id.replace('.TW', ''),
-                '名稱': ch_name, # 強制使用中文名稱
+                '名稱': ch_name,
                 '現價': round(current_price, 1),
                 '建議': action,
                 '技術': tech_signal,
                 '預測價': pred_display,
-                '潛在漲幅': gap_rate, # 用於排序
+                '潛在漲幅': gap_rate,
                 '漲幅顯示': gap_display
             })
 
         except Exception as e:
+            # 在這裡，我們不只是 pass，還可以考慮 print 出來除錯
+            # 但為了不讓畫面亂掉，我們先 pass，如果 results 為空再處理
             pass
             
     status_text.text("掃描完成！")
@@ -154,49 +150,53 @@ def run_analysis():
 if run_btn:
     df = run_analysis()
     
-    # 資料處理：排序 (強力買進優先 -> 潛在漲幅高優先)
-    def sort_score(row):
-        if "強力買進" in row['建議']: return 3
-        if "買進" in row['建議'] and "強力" not in row['建議']: return 2
-        if "觀察" in row['建議']: return 1
-        return 0
-    
-    df['SortScore'] = df.apply(sort_score, axis=1)
-    df = df.sort_values(by=['SortScore', '潛在漲幅'], ascending=[False, False])
-    
-    # --- 顯示區塊 1: 重點關注 (Top Picks) ---
-    st.subheader("🏆 本週首選 (強力買進)")
-    top_picks = df[df['建議'].str.contains("強力買進")]
-    
-    if not top_picks.empty:
-        for index, row in top_picks.iterrows():
-            col1, col2, col3 = st.columns(3)
-            col1.metric("股票", f"{row['名稱']} ({row['代號']})")
-            col2.metric("現價", f"{row['現價']}", f"{row['漲幅顯示']} (空間)")
-            col3.metric("狀態", row['技術'])
-            st.divider()
+    # === [關鍵修正] 檢查 DataFrame 是否為空 ===
+    if df.empty:
+        st.error("⚠️ 掃描失敗：抓不到任何資料。")
+        st.warning("可能原因：Yahoo Finance 暫時阻擋了連線 (Rate Limit)。請稍等 1 分鐘後再試。")
     else:
-        st.warning("目前沒有符合「強力買進」雙重條件的標的，建議觀望。")
+        # 資料處理：排序
+        def sort_score(row):
+            if "強力買進" in row['建議']: return 3
+            if "買進" in row['建議'] and "強力" not in row['建議']: return 2
+            if "觀察" in row['建議']: return 1
+            return 0
+        
+        df['SortScore'] = df.apply(sort_score, axis=1)
+        df = df.sort_values(by=['SortScore', '潛在漲幅'], ascending=[False, False])
+        
+        # --- 顯示區塊 1: 重點關注 ---
+        st.subheader("🏆 本週首選 (強力買進)")
+        top_picks = df[df['建議'].str.contains("強力買進")]
+        
+        if not top_picks.empty:
+            for index, row in top_picks.iterrows():
+                col1, col2, col3 = st.columns(3)
+                col1.metric("股票", f"{row['名稱']} ({row['代號']})")
+                col2.metric("現價", f"{row['現價']}", f"{row['漲幅顯示']} (空間)")
+                col3.metric("狀態", row['技術'])
+                st.divider()
+        else:
+            st.warning("目前沒有符合「強力買進」雙重條件的標的，建議觀望。")
 
-    # --- 顯示區塊 2: 完整報表 ---
-    st.subheader("📊 完整掃描清單")
-    
-    # 樣式美化
-    def color_survived(val):
-        color = ''
-        if '強力買進' in str(val):
-            color = 'background-color: #90EE90; color: black' # 淺綠
-        elif '避開' in str(val):
-            color = 'background-color: #FFB6C1; color: black' # 淺紅
-        return color
+        # --- 顯示區塊 2: 完整報表 ---
+        st.subheader("📊 完整掃描清單")
+        
+        def color_survived(val):
+            color = ''
+            if '強力買進' in str(val):
+                color = 'background-color: #90EE90; color: black' 
+            elif '避開' in str(val):
+                color = 'background-color: #FFB6C1; color: black'
+            return color
 
-    display_cols = ['代號', '名稱', '現價', '建議', '技術', '預測價', '漲幅顯示']
-    
-    st.dataframe(
-        df[display_cols].style.applymap(color_survived, subset=['建議']),
-        use_container_width=True,
-        hide_index=True
-    )
+        display_cols = ['代號', '名稱', '現價', '建議', '技術', '預測價', '漲幅顯示']
+        
+        st.dataframe(
+            df[display_cols].style.applymap(color_survived, subset=['建議']),
+            use_container_width=True,
+            hide_index=True
+        )
 
 else:
     st.info("👈 請點擊側邊欄的按鈕開始掃描")
